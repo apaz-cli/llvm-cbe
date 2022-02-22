@@ -288,7 +288,11 @@ raw_ostream &CWriter::printTypeString(raw_ostream &Out, Type *Ty,
 #endif
   {
     TypedefDeclTypes.insert(Ty);
+#if LLVM_VERSION_MAJOR > 10
+    FixedVectorType *VTy = cast<FixedVectorType>(Ty);
+#else
     VectorType *VTy = cast<VectorType>(Ty);
+#endif
     cwriter_assert(VTy->getNumElements() != 0);
     printTypeString(Out, VTy->getElementType(), isSigned);
     return Out << "x" << NumberOfElements(VTy);
@@ -831,6 +835,9 @@ CWriter::printFunctionProto(raw_ostream &Out, FunctionType *FTy,
 
   for (; I != E; ++I) {
     Type *ArgTy = *I;
+    if (ArgTy->isMetadataTy())
+      continue;
+
     if (PAL.hasAttribute(Idx, Attribute::ByVal)) {
       cwriter_assert(!shouldFixMain);
       cwriter_assert(ArgTy->isPointerTy());
@@ -1480,7 +1487,11 @@ void CWriter::printConstant(Constant *CPV, enum OperandContext Context) {
   case Type::VectorTyID:
 #endif
   {
+#if LLVM_VERSION_MAJOR > 10
+    FixedVectorType *VT = cast<FixedVectorType>(CPV->getType());
+#else
     VectorType *VT = cast<VectorType>(CPV->getType());
+#endif
     cwriter_assert(VT->getNumElements() != 0 && !isEmptyType(VT));
     if (Context != ContextStatic) {
       CtorDeclTypes.insert(VT);
@@ -2855,7 +2866,11 @@ void CWriter::generateHeader(Module &M) {
       printTypeName(Out, DstTy, DstSigned);
       Out << " out;\n";
       unsigned n, l = NumberOfElements(cast<VectorType>(DstTy));
+#if LLVM_VERSION_MAJOR > 10
+      cwriter_assert(cast<FixedVectorType>(SrcTy)->getNumElements() == l);
+#else
       cwriter_assert(cast<VectorType>(SrcTy)->getNumElements() == l);
+#endif
       for (n = 0; n < l; n++) {
         Out << "  out.vector[" << n << "] = in.vector[" << n << "];\n";
       }
@@ -3509,14 +3524,16 @@ void CWriter::printModuleTypes(raw_ostream &Out) {
   // printed in the correct order.
   Out << "\n/* Types Declarations */\n";
 
-  // forward-declare all structs here first
-
+  // Collect types referenced by structs and global functions, and
+  // forward-declare the structs.
   {
     std::set<Type *> TypesPrinted;
     for (auto it = TypedefDeclTypes.begin(), end = TypedefDeclTypes.end();
          it != end; ++it) {
       forwardDeclareStructs(Out, *it, TypesPrinted);
     }
+    for (const Function &F : *TheModule)
+      forwardDeclareStructs(Out, F.getFunctionType(), TypesPrinted);
   }
 
   Out << "\n/* Function definitions */\n";
@@ -3600,6 +3617,10 @@ void CWriter::forwardDeclareStructs(raw_ostream &Out, Type *Ty,
 
   if (StructType *ST = dyn_cast<StructType>(Ty)) {
     Out << getStructName(ST) << ";\n";
+  // Since function declarations come before the definitions of array-wrapper
+  // structs, it is sometimes necessary to forward-declare those.
+  } else if (auto *AT = dyn_cast<ArrayType>(Ty)) {
+    Out << getArrayName(AT) << ";\n";
   } else if (auto *FT = dyn_cast<FunctionType>(Ty)) {
     // Ensure function types which are only directly used by struct types will
     // get declared.
